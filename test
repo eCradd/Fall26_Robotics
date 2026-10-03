@@ -1,0 +1,471 @@
+#include "main.h"
+#include "lemlib/api.hpp" //Includes the lemlib library. DO NOT REMOVE.
+
+/*--------------------------------------------------------------------------*/
+
+// CONTROLLER INITIALIZATION
+
+pros::Controller controller(pros::E_CONTROLLER_MASTER);
+
+/*--------------------------------------------------------------------------*/
+
+//ADI (3-Wire Port) Sensor Initialization
+
+pros::ADIDigitalOut autonRush1 ('A'); //Part 1 of auton rush activation
+
+pros::ADIDigitalOut lift ('C'); //Lift intake to score on high goals
+
+pros::ADIDigitalOut autonRush2 ('D'); //Part 2 of auton rush activation
+
+pros::ADIDigitalOut scoringFlap ('E'); //Scoring flap opens to allow intake balls to exit
+
+pros::ADIDigitalOut tongueMech ('F'); //Flap for emptying loaders into intake
+
+pros::ADIDigitalOut descoringWings ('G'); //Wings to remove balls from high goals
+
+/*--------------------------------------------------------------------------*/
+
+pros::Optical optical_sensor(12);//optical sensor for color sorting code
+
+/*--------------------------------------------------------------------------*/
+
+//ODOM INITIALIZATION
+
+// create a v5 rotation sensor on port 4
+pros::Rotation rotation_sensorR(-4);
+// create a v5 rotation sensor on port 3
+pros::Rotation rotation_sensorL(5);
+// create a v5 rotation sensor on port 5
+pros::Rotation horizontal_sensor(3);
+
+// Create IMU Object
+pros::Imu imu_sensor(2);  // Initialize IMU on port 2
+
+//Create 2.125 inch tracking wheels
+//Offset distances are in inches from the center of the robot
+lemlib::TrackingWheel horizontal_tracking_wheel(
+    &horizontal_sensor, 2.0, 0.5);
+
+lemlib::TrackingWheel left_vert_tracking_wheel(
+    &rotation_sensorL, 2.0, -3.5);
+
+lemlib::TrackingWheel right_vert_tracking_wheel(
+    &rotation_sensorR, 2.0, 3.5);
+
+/*--------------------------------------------------------------------------*/
+
+// Motor groups. - sign equals reversed motor. Numbers are ports.
+//Blue motor gearsets = 600 RPM
+
+pros::MotorGroup rightMotors{{-6, 7, -8, 9, -10}, pros::MotorGearset::blue};
+
+pros::MotorGroup leftMotors{{16, -17, 18, -19, 21}, pros::MotorGearset::blue};
+
+// drivetrain setup
+lemlib::Drivetrain drivetrain(&leftMotors, // left motor group
+                              &rightMotors, // right motor group
+                              11.44, // 11.44 inch track width
+                              lemlib::Omniwheel::NEW_275, // using new 2.75" omnis
+                              600, // drivetrain rpm is 600
+                              4 // horizontal drift is 2 due to the use of traction wheels.
+
+);
+
+/*--------------------------------------------------------------------------*/
+
+// Intake motor group for collecting game pieces
+
+pros::MotorGroup intakeMotors{{1, -13, -14, -15}, pros::MotorGearset::blue};
+
+pros::MotorGroup outtakeMotors{{1, -13, -15}, pros::MotorGearset::blue};
+
+pros::MotorGroup hatchMotor{{-14}, pros::MotorGearset::blue};
+
+/*--------------------------------------------------------------------------*/
+
+//ODOM GROUP INITIALIZATION
+
+lemlib::OdomSensors sensors(&left_vert_tracking_wheel, //Odom sensor group for chassis
+
+                            nullptr,//&right_vert_tracking_wheel,
+
+                            &horizontal_tracking_wheel,
+                            
+                            nullptr,
+
+                            &imu_sensor //IMU sensor to help with heading
+);
+
+/*--------------------------------------------------------------------------*/
+
+//PID (Proportional Integral Derivative)Controllers will be created and passed
+//to the chassis for use in movement with Odometry
+
+//DO NOT UNDER ANY CIRCUMSTANCES CHANGE THE PID VALUES BELOW
+
+//Lateral PID controls movement along the X and Y axis
+//Angular PID controls rotation (change in heading)
+
+// lateral PID controller
+lemlib::ControllerSettings lateral_controller(9, // proportional gain (kP)
+                                              0, // integral gain (kI)
+                                              35, // derivative gain (kD)
+                                              3, // anti windup
+                                              0.5, // small error range, in inches
+                                              100, // small error range timeout, in milliseconds
+                                              2, // large error range, in inches
+                                              500, // large error range timeout, in milliseconds
+                                              0 // maximum acceleration (slew)
+);
+
+// angular PID controller
+lemlib::ControllerSettings angular_controller(4.9, // proportional gain (kP) (4.85)
+                                              0, // integral gain (kI)
+                                              32, // derivative gain (kD)
+                                              3, // anti windup
+                                              1, // small error range, in inches
+                                              100, // small error range timeout, in milliseconds
+                                              3, // large error range, in inches
+                                              500, // large error range timeout, in milliseconds
+                                              0 // maximum acceleration (slew)
+);
+
+/*--------------------------------------------------------------------------*/
+
+// Chassis initialization : Combine drivetrain, odom sensors, and PID controllers for movement
+// types
+
+lemlib::Chassis chassis(drivetrain, // drivetrain settings
+                        lateral_controller, // lateral PID settings
+                        angular_controller, // angular PID settings
+                        sensors // odometry sensors
+);
+
+/*--------------------------------------------------------------------------*/
+
+//Controller Functions for driver control
+
+//Lift control state global variables
+bool liftState = false;      // false = off, true = on
+bool lastLiftButton = false; // previous button state
+bool lastTongueButton = false; // previous button state
+bool tongueState = false;
+bool descoreState = false;
+bool lastDescoreButton = false; // previous button state
+
+/*Scoring will lift up the flap and spin the intake to score on the highest goals
+While both R1 and R2 are held*/
+void score() {
+    if (controller.get_digital(pros::E_CONTROLLER_DIGITAL_R1) && 
+        controller.get_digital(pros::E_CONTROLLER_DIGITAL_R2)) { //Checks if R1 and R2 are held
+        
+        intakeMotors.move(127); //Continue running intake to output balls
+
+        scoringFlap.set_value(false); //Open scoring flap
+ 
+    }
+    else {
+        scoringFlap.set_value(true); //Close scoring flap when not scoring
+    }
+}
+
+//Intake balls with R1 without scoring
+void controlIntake() {
+    if (controller.get_digital(pros::E_CONTROLLER_DIGITAL_R1) &&
+     !controller.get_digital(pros::E_CONTROLLER_DIGITAL_R2)) {
+
+        intakeMotors.move(127); // Intake forward
+        scoringFlap.set_value(true); //Ensure scoring flap is closed
+
+    } else {
+        intakeMotors.move(0); // Stop intake
+    }
+}
+
+//Outtake balls with R2 to score on the low goal
+void controlOuttake() {
+    if (controller.get_digital(pros::E_CONTROLLER_DIGITAL_R2)) {
+        outtakeMotors.move(-127); // Outtake
+    } else {
+        //outtakeMotors.move(0); // Stop outtake
+    }
+}
+
+void controlLift(){
+
+    bool currentButton = controller.get_digital(pros::E_CONTROLLER_DIGITAL_L2);
+
+    // Detect button press (rising edge)
+    if (currentButton && !lastLiftButton) {
+        liftState = !liftState;        // toggle state
+        lift.set_value(liftState);     // activate/deactivate lift
+    }
+
+    lastLiftButton = currentButton; // save state for next loop
+}
+
+void toungeMech(){
+
+    bool currentButton2 = controller.get_digital(pros::E_CONTROLLER_DIGITAL_B);
+
+    // Detect button press (rising edge)
+    if (currentButton2 && !lastTongueButton) {
+        tongueState = !tongueState;        // toggle state
+        tongueMech.set_value(tongueState);     // activate/deactivate tongue
+    }
+
+    lastTongueButton = currentButton2; // save state for next loop
+}
+
+void descoreArm(){
+
+    bool currentButton3 = controller.get_digital(pros::E_CONTROLLER_DIGITAL_L1);
+
+    // Detect button press (rising edge)
+    if (currentButton3 && !lastDescoreButton) {
+        descoreState = !descoreState;        // toggle state
+        descoringWings.set_value(descoreState);     // activate/deactivate descore
+    }
+
+    lastDescoreButton = currentButton3; // save state for next loop
+
+}
+
+/*void colorSort(){
+    double hue = optical_sensor.get_hue();
+    bool colorDetected;
+    int maxTime = 250;
+    int delay = 25;
+if(hue > 180 && hue < 270){
+    controller.print(0,0,"Blue Detected!");
+    colorDetected = true;
+}
+else{
+    colorDetected = false;
+}
+if(colorDetected|| x > 0 && x<= maxTime){
+    if(x >= delay){
+        hatchMotor.move(-127);
+    }
+    x += 25;
+    if(x >= maxTime){
+        x = 0
+    }
+}
+}
+*/
+
+void colorSort(int t){
+    int time = 0;
+    while(time<t){
+        double hue = optical_sensor.get_hue();
+        if(hue > 180 && hue < 270){
+    controller.print(0,0,"Blue Detected!");
+    hatchMotor.move(-127);
+    pros::delay(20);
+    time += 20;
+}
+else{
+    pros::delay(1000);
+    time += 1000;
+    hatchMotor.move(127);
+}
+}
+}
+
+
+
+
+/*--------------------------------------------------------------------------*/
+
+/**
+ * Runs initialization code. This occurs as soon as the program is started.
+ *
+ * All other competition modes are blocked by initialize; it is recommended
+ * to keep execution time for this mode under a few seconds.
+ */
+ /* Runs initialization code. This occurs as soon as the program is started.
+ *
+ * All other competition modes are blocked by initialize; it is recommended
+ * to keep execution time for this mode under a few seconds.
+ */
+void initialize() {
+
+	pros::lcd::initialize(); // initialize brain screen
+
+    chassis.calibrate(); // calibrate sensors
+
+    optical_sensor.set_led_pwm(100);
+
+    while (imu_sensor.is_calibrating()) {
+        pros::delay(10);
+    }
+
+}
+/**
+ * Runs while the robot is in the disabled state of Field Management System or
+ * the VEX Competition Switch, following either autonomous or opcontrol. When
+ * the robot is enabled, this task will exit.
+ */
+void disabled() {}
+
+/**
+ * Runs after initialize(), and before autonomous when connected to the Field
+ * Management System or the VEX Competition Switch. This is intended for
+ * competition-specific initialization routines, such as an autonomous selector
+ * on the LCD.
+ *
+ * This task will exit when the robot is enabled and autonomous or opcontrol
+ * starts.
+ */
+void competition_initialize() {}
+
+/**
+ * Runs the user autonomous code. This function will be started in its own task
+ * with the default priority and stack size whenever the robot is enabled via
+ * the Field Management System or the VEX Competition Switch in the autonomous
+ * mode. Alternatively, this function may be called in initialize or opcontrol
+ * for non-competition testing purposes.
+ *
+ * If the robot is disabled or communications is lost, the autonomous task
+ * will be stopped. Re-enabling the robot will restart the task, not re-start it
+ * from where it left off.
+ */
+void autonomous() {
+
+    chassis.setPose(-16.5, -3.75, -90);
+
+    //Move to the point in between the right loader and long goal to prepare for scoring
+	chassis.moveToPoint(-46.5, 0, 10000, lemlib::MoveToPointParams{.maxSpeed = 90}); 
+    //Move to scoring position
+
+    chassis.turnToHeading(180, 5000, lemlib::TurnToHeadingParams{.maxSpeed = 65});
+
+    pros::delay(50);
+
+	//Prep pneumatic systems for loading
+	tongueMech.set_value(true);
+
+	lift.set_value(true);
+
+	scoringFlap.set_value(true); //Scoring flap is closed
+
+	//Move into loader
+	chassis.moveToPoint(-46.5, -16, 4500, lemlib::MoveToPointParams{.maxSpeed = 60});
+	//Original::48.5
+	
+	pros::delay(50);
+
+	//Intake loader
+	intakeMotors.move(127);
+
+	pros::delay(2500);
+
+	intakeMotors.move(0);
+
+	//Back out of loader
+	chassis.moveToPoint(-46.5, 4, 10000, 
+		lemlib::MoveToPointParams{.forwards = false, .maxSpeed = 50});
+
+        pros::delay(50);
+
+        tongueMech.set_value(false);
+
+    chassis.turnToHeading(135, 5000, lemlib::TurnToHeadingParams{.maxSpeed = 60});
+
+    outtakeMotors.move_voltage(-12000);
+
+    pros::delay(500);
+
+    outtakeMotors.move_voltage(0);
+
+    chassis.turnToHeading(180, 5000, lemlib::TurnToHeadingParams{.maxSpeed = 65});
+
+    pros::delay(50);
+
+	//Prep pneumatic systems for loading
+	tongueMech.set_value(true);
+
+    chassis.moveToPoint(-46.5, -15.7, 4500, lemlib::MoveToPointParams{.maxSpeed = 55});
+	//Original::48.5
+
+	pros::delay(50);
+
+	//Intake loader
+	intakeMotors.move(127);
+
+	pros::delay(2500);
+
+	intakeMotors.move(0);
+
+    chassis.moveToPoint(-49, 4, 10000, 
+		lemlib::MoveToPointParams{.forwards = false, .maxSpeed = 80});
+
+	pros::delay(10);
+
+	//Open scoring flap
+	scoringFlap.set_value(false);
+
+	//Face long goal
+	chassis.turnToHeading(0, 5000, lemlib::TurnToHeadingParams{.maxSpeed = 70}); //Face the goal
+
+
+	//Raise tongue mech
+	tongueMech.set_value(false);
+
+	//Move to the goal and score
+	chassis.moveToPoint(-49, 16.5, 2000, lemlib::MoveToPointParams{.maxSpeed = 80}); //Move forward to score
+	//49.75 original value
+
+	pros::delay(600);
+
+	intakeMotors.move(127);
+
+	pros::delay(2000);
+
+	intakeMotors.move(0);
+	}
+void opcontrol() {
+	
+    // loop forever
+    while (true) {
+
+
+        // get left y and right x positions
+        int rightY = controller.get_analog(pros::E_CONTROLLER_ANALOG_LEFT_Y);
+        int leftX = controller.get_analog(pros::E_CONTROLLER_ANALOG_RIGHT_X);
+
+        // move the robot
+        chassis.arcade(rightY, leftX); //Arcade drive control is based around 1 joystick
+        score(); //Score on tallest goals
+
+        
+        /*IF condition checks if R1 and R2 are being pressed simultaneously (scoring mode)
+        This is required to keep outtake from spinning in the middle of scoring mode*/
+        if (!controller.get_digital(pros::E_CONTROLLER_DIGITAL_R1) || 
+            !controller.get_digital(pros::E_CONTROLLER_DIGITAL_R2)) 
+        {
+        controlIntake();
+        controlOuttake();
+        }
+
+        controlLift();
+        toungeMech();
+        descoreArm();
+        //colorSort();
+
+
+        // Get odometry values from chassis (x, y, heading)
+        double x = chassis.getPose().x;
+        double y = chassis.getPose().y;
+        double heading = chassis.getPose().theta;
+
+        // Print the odometry values to the controller screen
+        controller.print(0, 0, "Y: %.2f, X: %.2f", y , x);
+
+        
+        // delay to save resources
+        pros::delay(25);
+    }
+
+}
